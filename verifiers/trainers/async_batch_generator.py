@@ -170,7 +170,8 @@ class AsyncBatchGenerator:
                 
             # Check timeout
             if time.time() - start_time > timeout:
-                raise TimeoutError(f"Batch {batch_id} generation timed out after {timeout}s")
+                print(f"Batch {batch_id} generation timed out after {timeout}s")
+                pass
                 
     def get_pending_count(self) -> int:
         """Get number of batches currently being generated"""
