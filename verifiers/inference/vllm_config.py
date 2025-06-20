@@ -6,7 +6,7 @@ from typing import Optional, Literal, Union
 @dataclass
 class VLLMServerConfig:
     # Model configuration
-    model: str = field(
+    model_name_or_path: str = field(
         default="",
         metadata={"help": "Model name or path to load the model from."}
     )
@@ -82,3 +82,6 @@ class VLLMServerConfig:
         default="info",
         metadata={"help": "Log level for uvicorn."}
     )
+
+    def __post_init__(self):
+        self.model = self.model_name_or_path
