@@ -6,9 +6,13 @@ from typing import Optional, Literal, Union
 @dataclass
 class VLLMServerConfig:
     # Model configuration
-    model_name_or_path: str = field(
-        default="",
-        metadata={"help": "Model name or path to load the model from."}
+    model_name_or_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Model name or path to load the model from."},
+    )
+    model: Optional[str] = field(
+        default=None,
+        metadata={"help": "vLLM model object. If provided, model_name_or_path will be ignored."},
     )
     revision: Optional[str] = field(
         default=None,
@@ -84,4 +88,9 @@ class VLLMServerConfig:
     )
 
     def __post_init__(self):
-        self.model = self.model_name_or_path
+        if self.model_name_or_path is None and self.model is None:
+            raise ValueError("Either model_name_or_path or model must be provided.")
+        if self.model_name_or_path is not None and self.model is not None:
+            raise ValueError("Only one of model_name_or_path or model must be provided.")
+        if self.model_name_or_path is not None:
+            self.model = self.model_name_or_path

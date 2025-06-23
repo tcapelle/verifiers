@@ -929,6 +929,15 @@ class GRPOTrainer(Trainer):
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
         per_token_logps = self._get_per_token_logps(model, input_ids, attention_mask, logits_to_keep)
 
+        # Debug logging
+        if self.accelerator.is_main_process:
+            print(f"Inputs shape: {inputs['prompt_ids'].shape}")
+            print(f"Batch size: {prompt_ids.shape[0]}")
+            print(f"Prompt length: {prompt_ids.shape[1]}")
+            print(f"Completion length: {completion_ids.shape[1]}")
+            print(f"Total memory per sample: {(prompt_ids.shape[1] + completion_ids.shape[1]) * 4} bytes")
+            print("=====================================================================================")
+
         # Compute the loss
         advantages = inputs["advantages"]
         # When using num_iterations == 1, old_per_token_logps == per_token_logps,
