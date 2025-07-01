@@ -284,39 +284,35 @@ class Environment(ABC):
         """
         Run rollouts for a given list of prompts and return the completions.
         """
-        def setup_executor(loop):
-            if loop._default_executor is None:
-                executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent)
-                loop.set_default_executor(executor)
-        
+        # ------------------------------------------------------------------
+        # Use a persistent event loop to avoid shutting down the default
+        # ThreadPoolExecutor while background tasks may still schedule work.
+        # ------------------------------------------------------------------
+
+        if not hasattr(self, "_loop") or self._loop is None:
+            self._loop = asyncio.new_event_loop()
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent)
+            self._loop.set_default_executor(executor)
+
+        loop = self._loop
+
         coro = self._run_all(
             client=client,
             model=model,
             prompts=prompts,
-            answers=answers, 
+            answers=answers,
             tasks=tasks,
             infos=infos,
             sampling_args=sampling_args,
-            max_concurrent=max_concurrent, 
+            max_concurrent=max_concurrent,
             **kwargs
         )
+
         try:
-            # Create new event loop with custom executor
-            loop = asyncio.new_event_loop()
-            setup_executor(loop)
             asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(coro)
-            finally:
-                loop.close()
-                asyncio.set_event_loop(None)
-        except RuntimeError:
-            # Jupyter notebook or existing event loop
-            import nest_asyncio
-            nest_asyncio.apply()
-            loop = asyncio.get_running_loop()
-            setup_executor(loop)
             return loop.run_until_complete(coro)
+        finally:
+            asyncio.set_event_loop(None)
     
     @weave.op
     def generate(self,

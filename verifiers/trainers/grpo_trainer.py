@@ -1187,8 +1187,20 @@ class GRPOTrainer(Trainer):
         Log textual data for wandb (PRIMARY PROCESS ONLY).
         This logs the full batch of prompts, completions, and rewards.
         """
-        self._textual_logs["prompt"].extend(all_prompts)
-        self._textual_logs["completion"].extend(all_completions)
+        # Ensure prompts / completions are strings before logging (wandb Tables
+        # cannot store arbitrary nested objects).  For chat format we flatten
+        # the list-of-messages into a single string with "role: content" lines.
+
+        def _to_str(x):
+            if isinstance(x, str):
+                return x
+            # Assume chat format list[{role,content}]
+            if isinstance(x, list):
+                return "\n".join(f"{m.get('role', '')}: {m.get('content', '')}" for m in x)
+            return str(x)
+
+        self._textual_logs["prompt"].extend([_to_str(p) for p in all_prompts])
+        self._textual_logs["completion"].extend([_to_str(c) for c in all_completions])
         
         # Log all reward scores - both individual functions and consolidated
         for reward_key in all_reward_dict:

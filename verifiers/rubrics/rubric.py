@@ -170,31 +170,33 @@ class Rubric:
         - inter-group comparisons (voting, ranking, Elo, etc.)
         - scores computed using global state stored in Rubric class
         """
-        # Set up custom executor for the event loop if needed
-        def setup_executor(loop):
-            if loop._default_executor is None:
-                executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent)
-                loop.set_default_executor(executor)
-        
+        # ------------------------------------------------------------------
+        # Re-use a single event loop so its default ThreadPoolExecutor stays
+        # alive across multiple calls. This prevents race conditions where
+        # ``asyncio.to_thread`` tries to schedule work after the executor has
+        # already been shut down ("cannot schedule new futures after interpreter
+        # shutdown").
+        # ------------------------------------------------------------------
+
+        # Lazily create the loop on first use
+        if not hasattr(self, "_loop") or self._loop is None:
+            self._loop = asyncio.new_event_loop()
+            # Attach a sufficiently large shared executor
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent)
+            self._loop.set_default_executor(executor)
+
+        loop = self._loop
+
         coro = self._score_all(
             prompts, completions, answers, states, tasks, infos,
             max_concurrent=max_concurrent,
             **kwargs
         )
+
         try:
-            # Create new event loop with custom executor
-            loop = asyncio.new_event_loop()
-            setup_executor(loop)
             asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(coro)
-            finally:
-                loop.close()
-                asyncio.set_event_loop(None)
-        except RuntimeError:
-            # Jupyter notebook or existing event loop
-            import nest_asyncio 
-            nest_asyncio.apply()
-            loop = asyncio.get_running_loop()
-            setup_executor(loop)
             return loop.run_until_complete(coro)
+        finally:
+            # Detach loop so nested calls that expect no running loop can
+            # create their own. *Do not* close the loop/executor here.
+            asyncio.set_event_loop(None)
