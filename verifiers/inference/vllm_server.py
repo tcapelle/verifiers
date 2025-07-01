@@ -44,6 +44,10 @@ from vllm.utils import get_open_port
 from transformers import AutoTokenizer
 
 
+from trl import TrlParser
+from verifiers.inference.vllm_config import VLLMServerConfig
+
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__) # Ensure logger is defined
 
@@ -279,141 +283,6 @@ class WeightSyncWorkerExtension:
             self.client_rank = None  # Ensure attribute is reset to None
 
 
-@dataclass
-class ScriptArguments:
-    r"""
-    Arguments for the script.
-
-    Args:
-        model (`str`):
-            Model name or path to load the model from.
-        revision (`str` or `None`, *optional*, defaults to `None`):
-            Revision to use for the model. If not specified, the default branch will be used.
-        tensor_parallel_size (`int`, *optional*, defaults to `1`):
-            Number of tensor parallel workers to use.
-        data_parallel_size (`int`, *optional*, defaults to `1`):
-            Number of data parallel workers to use.
-        host (`str`, *optional*, defaults to `"0.0.0.0"`):
-            Host address to run the server on.
-        port (`int`, *optional*, defaults to `8000`):
-            Port to run the server on.
-        gpu_memory_utilization (`float`, *optional*, defaults to `0.95`):
-            Ratio (between 0 and 1) of GPU memory to reserve for the model weights, activations, and KV cache on the
-            device dedicated to generation powered by vLLM. Higher values will increase the KV cache size and thus
-            improve the model's throughput. However, if the value is too high, it may cause out-of-memory (OOM) errors
-            during initialization.
-        dtype (`str`, *optional*, defaults to `"auto"`):
-            Data type to use for vLLM generation. If set to `"auto"`, the data type will be automatically determined
-            based on the model configuration. Find the supported values in the vLLM documentation.
-        max_model_len (`int` or `None`, *optional*, defaults to `None`):
-            If set, the `max_model_len` to use for vLLM. This can be useful when running with reduced
-            `vllm_gpu_memory_utilization`, leading to a reduced KV cache size. If not set, vLLM will use the model
-            context size, which might be much larger than the KV cache, leading to inefficiencies.
-        enable_prefix_caching (`bool` or `None`, *optional*, defaults to `None`):
-            Whether to enable prefix caching in vLLM. If set to `True`, ensure that the model and the hardware support
-            this feature.
-        enforce_eager (`bool` or `None`, *optional*, defaults to `None`):
-            Whether to enforce eager execution. If set to `True`, we will disable CUDA graph and always execute the
-            model in eager mode. If `False` (default behavior), we will use CUDA graph and eager execution in hybrid.
-        kv_cache_dtype (`str`, *optional*, defaults to `"auto"`):
-            Data type to use for KV cache. If set to `"auto"`, the dtype will default to the model data type.
-        log_level (`str`, *optional*, defaults to `"info"`):
-            Log level for uvicorn. Possible choices: `"critical"`, `"error"`, `"warning"`, `"info"`, `"debug"`,
-            `"trace"`.
-        max_batch_size (int):
-            Maximum number of requests to process in one LLM call from the active pool.
-        batch_request_timeout_seconds (int):
-            Timeout in seconds for a single request waiting for its turn and completion.
-        token_chunk_size (int):
-            Number of tokens to generate per iteration per request in token-chunk dynamic batching.
-        """
-
-    model: str = field(metadata={"help": "Model name or path to load the model from."})
-    revision: Optional[str] = field(
-        default=None,
-        metadata={"help": "Revision to use for the model. If not specified, the default branch will be used."},
-    )
-    tensor_parallel_size: int = field(
-        default=1,
-        metadata={"help": "Number of tensor parallel workers to use."},
-    )
-    data_parallel_size: int = field(
-        default=1,
-        metadata={"help": "Number of data parallel workers to use."},
-    )
-    host: str = field(
-        default="0.0.0.0",
-        metadata={"help": "Host address to run the server on."},
-    )
-    port: int = field(
-        default=8000,
-        metadata={"help": "Port to run the server on."},
-    )
-    gpu_memory_utilization: float = field(
-        default=0.95,
-        metadata={
-            "help": "Ratio (between 0 and 1) of GPU memory to reserve for the model weights, activations, and KV "
-            "cache on the device dedicated to generation powered by vLLM. Higher values will increase the KV cache "
-            "size and thus improve the model's throughput. However, if the value is too high, it may cause "
-            "out-of-memory (OOM) errors during initialization."
-        },
-    )
-    dtype: str = field(
-        default="auto",
-        metadata={
-            "help": "Data type to use for vLLM generation. If set to 'auto', the data type will be automatically "
-            "determined based on the model configuration. Find the supported values in the vLLM documentation."
-        },
-    )
-    max_model_len: int = field(
-        default=8192,
-        metadata={
-            "help": "If set, the `max_model_len` to use for vLLM. This can be useful when running with reduced "
-            "`vllm_gpu_memory_utilization`, leading to a reduced KV cache size. If not set, vLLM will use the model "
-            "context size, which might be much larger than the KV cache, leading to inefficiencies."
-        },
-    )
-    enable_prefix_caching: Optional[bool] = field(
-        default=True,
-        metadata={
-            "help": "Whether to enable prefix caching in vLLM. If set to `True`, ensure that the model and the "
-            "hardware support this feature."
-        },
-    )
-    enforce_eager: Optional[bool] = field(
-        default=None,
-        metadata={
-            "help": "Whether to enforce eager execution. If set to `True`, we will disable CUDA graph and always "
-            "execute the model in eager mode. If `False` (default behavior), we will use CUDA graph and eager "
-            "execution in hybrid."
-        },
-    )
-    kv_cache_dtype: str = field(
-        default="auto",
-        metadata={
-            "help": "Data type to use for KV cache. If set to 'auto', the dtype will default to the model data type."
-        },
-    )
-    log_level: str = field(
-        default="info",
-        metadata={
-            "help": "Log level for uvicorn. Possible choices: 'critical', 'error', 'warning', 'info', 'debug', "
-            "'trace'."
-        },
-    )
-    max_batch_size: int = field(
-        default=1024,
-        metadata={"help": "Maximum number of requests to process in one LLM call from the active pool."},
-    )
-    batch_request_timeout_seconds: int = field(
-        default=300,
-        metadata={"help": "Timeout in seconds for a single request waiting for its turn and completion."},
-    )
-    token_chunk_size: int = field(
-        default=64,
-        metadata={"help": "Number of tokens to generate per iteration in token-chunk dynamic batching."},
-    )
-
 # Global/module-level variables for token-chunk dynamic batching
 _SAMPLING_PARAM_NAMES: Optional[frozenset[str]] = None
 
@@ -536,7 +405,7 @@ def create_pool_signature(
     )
 
 def llm_worker(
-    script_args: ScriptArguments, data_parallel_rank: int, master_port: int, connection: MPConnection
+    script_args: VLLMServerConfig, data_parallel_rank: int, master_port: int, connection: MPConnection
 ) -> None:
     # Set required environment variables for DP to work with vLLM
     os.environ["VLLM_DP_RANK"] = str(data_parallel_rank)
@@ -616,7 +485,7 @@ def chunk_list(lst: list, n: int) -> list[list]:
     return [lst[i * k + min(i, r) : (i + 1) * k + min(i + 1, r)] for i in range(n)]
 
 async def batch_processing_loop(
-    script_args: ScriptArguments, 
+    script_args: VLLMServerConfig, 
     connections: list[AnyType], 
     queue: asyncio.Queue, # This queue now receives PooledRequestState
     logger_instance: logging.Logger
@@ -1354,7 +1223,7 @@ async def batch_processing_loop(
                     req_state.completed_and_signaled = True
             await asyncio.sleep(1) # Pause before retrying loop
 
-def main(script_args: ScriptArguments):
+def main(script_args: VLLMServerConfig):
     global request_queue, batch_processor_task # Allow lifespan to assign to these
     global proxy_tokenizer # Add this global
 
@@ -1883,9 +1752,6 @@ def main(script_args: ScriptArguments):
         workers=num_uvicorn_workers,
         ws_max_queue=1024
     )
-
-from trl import TrlParser
-from verifiers.inference.vllm_config import VLLMServerConfig
 
 def cli_main():
     """Entry point for the vf-vllm CLI command."""
