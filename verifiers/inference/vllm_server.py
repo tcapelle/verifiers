@@ -82,6 +82,12 @@ async def get_next_worker_connection(connections: list[AnyType]) -> tuple[int, A
         worker_rotation_index += 1
         return worker_idx, connections[worker_idx]
 
+# -------- Usage tracking ---------- #
+class Usage(BaseModel):
+    completion_tokens: int
+    prompt_tokens: int
+    total_tokens: int
+
 # -------- OpenAI /v1/chat/completions Pydantic Models ---------- #
 class OAChatMessage(BaseModel):
     role: str
@@ -113,6 +119,7 @@ class OAChatCompletionResponse(BaseModel):
     created: int
     model: str
     choices: list[OAChatChoice]
+    usage: Usage
 
 # -------- OpenAI /v1/completions Pydantic Models ---------- #
 class OACompletionRequest(BaseModel):
@@ -140,6 +147,7 @@ class OACompletionResponse(BaseModel):
     created: int
     model: str
     choices: list[OACompletionChoice]
+    usage: Usage
 # ---------------------------------------------------------------------- #
 
 def send_and_recv(conn: MPConnection, payload: dict):
@@ -434,6 +442,7 @@ class PooledRequestState:
     finish_reason: Optional[str] = None
     completed_and_signaled: bool = False
     timed_out: bool = False
+    prompt_tokens: int = 0  # Track prompt tokens from vLLM
     
     @property
     def is_complete(self) -> bool:
@@ -1076,6 +1085,10 @@ async def batch_processing_loop(
                                 new_token_count = len(completion_output.token_ids)
                                 req_state.generated_token_count += new_token_count
                                 
+                                # Track usage information from vLLM - only set prompt_tokens once
+                                if req_state.prompt_tokens == 0 and hasattr(request_output, 'prompt_token_ids'):
+                                    req_state.prompt_tokens = len(request_output.prompt_token_ids)
+                                
                                 # Store vLLM's finish reason but we'll interpret it carefully
                                 vllm_finish_reason = completion_output.finish_reason
                                 logger_instance.debug(f"[VLLM_RESPONSE] Request {req_state.request_id}: vLLM returned {new_token_count} tokens, finish_reason={vllm_finish_reason}")
@@ -1136,6 +1149,10 @@ async def batch_processing_loop(
                                 req_state.accumulated_content += new_text_chunk
                                 new_token_count = len(completion_output.token_ids)
                                 req_state.generated_token_count += new_token_count
+                                
+                                # Track usage information from vLLM - only set prompt_tokens once
+                                if req_state.prompt_tokens == 0 and hasattr(request_output, 'prompt_token_ids'):
+                                    req_state.prompt_tokens = len(request_output.prompt_token_ids)
                                 
                                 # Store vLLM's finish reason but we'll interpret it carefully
                                 vllm_finish_reason = completion_output.finish_reason
@@ -1225,11 +1242,17 @@ async def batch_processing_loop(
                                     message=OAChatMessage(role="assistant", content=error_message),
                                     finish_reason=req_state.finish_reason or "error"
                                 )]
+                                usage = Usage(
+                                    completion_tokens=req_state.generated_token_count,
+                                    prompt_tokens=req_state.prompt_tokens,
+                                    total_tokens=req_state.generated_token_count + req_state.prompt_tokens
+                                )
                                 response_content = OAChatCompletionResponse(
                                     id=f"chatcmpl-{uuid4().hex}",
                                     created=int(datetime.now(tz=timezone.utc).timestamp()),
                                     model=req_state.original_request.model,
-                                    choices=final_choices
+                                    choices=final_choices,
+                                    usage=usage
                                 )
                             else:  # Completion
                                 error_message = f"[ERROR] {str(req_state.error)}"
@@ -1238,11 +1261,17 @@ async def batch_processing_loop(
                                     text=error_message, 
                                     finish_reason=req_state.finish_reason or "error"
                                 )]
+                                usage = Usage(
+                                    completion_tokens=req_state.generated_token_count,
+                                    prompt_tokens=req_state.prompt_tokens,
+                                    total_tokens=req_state.generated_token_count + req_state.prompt_tokens
+                                )
                                 response_content = OACompletionResponse(
                                     id=f"cmpl-{uuid4().hex}",
                                     created=int(datetime.now(tz=timezone.utc).timestamp()),
                                     model=req_state.original_request.model,
-                                    choices=final_choices
+                                    choices=final_choices,
+                                    usage=usage
                                 )
                         elif req_state.request_type == "chat":
                             final_choices = [OAChatChoice(
@@ -1250,11 +1279,17 @@ async def batch_processing_loop(
                                 message=OAChatMessage(role="assistant", content=req_state.accumulated_content),
                                 finish_reason=req_state.finish_reason
                             )]
+                            usage = Usage(
+                                completion_tokens=req_state.generated_token_count,
+                                prompt_tokens=req_state.prompt_tokens,
+                                total_tokens=req_state.generated_token_count + req_state.prompt_tokens
+                            )
                             response_content = OAChatCompletionResponse(
                                 id=f"chatcmpl-{uuid4().hex}", # Use original request_id if available? For now, new UUID.
                                 created=int(datetime.now(tz=timezone.utc).timestamp()),
                                 model=req_state.original_request.model,
-                                choices=final_choices
+                                choices=final_choices,
+                                usage=usage
                             )
                         else: # Completion
                             final_choices = [OACompletionChoice(
@@ -1262,11 +1297,17 @@ async def batch_processing_loop(
                                 text=req_state.accumulated_content, 
                                 finish_reason=req_state.finish_reason
                             )]
+                            usage = Usage(
+                                completion_tokens=req_state.generated_token_count,
+                                prompt_tokens=req_state.prompt_tokens,
+                                total_tokens=req_state.generated_token_count + req_state.prompt_tokens
+                            )
                             response_content = OACompletionResponse(
                                 id=f"cmpl-{uuid4().hex}",
                                 created=int(datetime.now(tz=timezone.utc).timestamp()),
                                 model=req_state.original_request.model,
-                                choices=final_choices
+                                choices=final_choices,
+                                usage=usage
                             )
                         
                         req_state.result_container[0] = response_content
