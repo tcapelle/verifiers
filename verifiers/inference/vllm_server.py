@@ -47,6 +47,7 @@ from transformers import AutoTokenizer
 from trl import TrlParser
 from verifiers.inference.vllm_config import VLLMServerConfig
 
+APP_TIMEOUT_SECONDS = 600
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__) # Ensure logger is defined
@@ -1256,7 +1257,7 @@ def main(script_args: VLLMServerConfig):
         ready_connections = set()
         
         # Timeout for waiting for workers to get ready (e.g., 5 minutes)
-        timeout_seconds = 300 
+        timeout_seconds = APP_TIMEOUT_SECONDS 
         start_wait_time = time.time()
 
         while len(ready_connections) < script_args.data_parallel_size:
@@ -1757,6 +1758,8 @@ def cli_main():
     """Entry point for the vf-vllm CLI command."""
     parser = TrlParser(VLLMServerConfig)
     script_args = parser.parse_args_and_config()[0]
+    print("Script args:")
+    print(script_args)
     
     main(script_args)
 
