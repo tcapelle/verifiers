@@ -149,9 +149,9 @@ class VLLMClient(OpenAI):
 
         # Initialize weight update group
         url = f"{self.server_url}/init_communicator"
-        # Send the actual host address for the StatelessProcessGroup connection
+        # Send "0.0.0.0" to allow server to bind to all interfaces (required for Kubernetes)
         try:
-            response = self.session.post(url, json={"host": self.host, "port": self.group_port, "world_size": world_size})
+            response = self.session.post(url, json={"host": "0.0.0.0", "port": self.group_port, "world_size": world_size})
         except Exception as e:
             logger.error(f"Failed to init communicator: {e}")
             raise
