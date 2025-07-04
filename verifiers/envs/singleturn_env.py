@@ -1,6 +1,6 @@
 from typing import List, Dict, Any, Literal, Tuple, Union
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from verifiers.envs.environment import Environment
 import weave
@@ -14,10 +14,10 @@ class SingleTurnEnv(Environment):
                  **kwargs):
         super().__init__(message_type=message_type, **kwargs)
         self.message_type = message_type
-    
+        
     @weave.op
-    def rollout(self,
-                client: OpenAI,
+    async def rollout(self,
+                client: AsyncOpenAI,
                 model: str,
                 prompt: Union[str, List[Dict[str, Any]]],
                 answer: str,
@@ -28,7 +28,7 @@ class SingleTurnEnv(Environment):
         """
         Returns completion (str or message list) and null state.
         """
-        completion = self.get_model_response(
+        completion = await self.get_model_response(
             client=client,
             model=model,
             prompt=prompt,

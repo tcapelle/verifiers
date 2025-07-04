@@ -98,7 +98,7 @@ class TextArenaEnv(MultiTurnEnv):
             feedback = observation
         env_message = {"role": "user", "content": feedback}
         return env_message, state
-    
+
     def ta_to_hf(self) -> Tuple[Dataset, Dataset]:
         dataset_rows = []
         eval_dataset_rows = []

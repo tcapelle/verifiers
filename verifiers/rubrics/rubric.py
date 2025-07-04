@@ -53,15 +53,15 @@ class Rubric:
         self.reward_funcs.append(func)
         self.reward_weights.append(weight)
 
-    def _call_reward_func(self,
-                          func: RewardFunc,
-                          prompt: Union[str, List[Dict[str, Any]]],
-                          completion: Union[str, List[Dict[str, Any]]],
-                          answer: Any,
-                          state: Dict[str, Any],
-                          task: str = "default",
-                          info: dict = {},
-                          **kwargs) -> float:
+    async def call_reward_func(self,
+                               func: RewardFunc,
+                               prompt: Union[str, List[Dict[str, Any]]],
+                               completion: Union[str, List[Dict[str, Any]]],
+                               answer: Any,
+                               state: Dict[str, Any],
+                               task: str = "default",
+                               info: dict = {},
+                               **kwargs) -> float:
         """
         Invoke `func` with only the required arguments.
 
@@ -109,56 +109,24 @@ class Rubric:
         """
         Evaluate all reward functions asynchronously for a single rollout.
         """
-        futures = [
-            asyncio.to_thread(
-                self._call_reward_func,
-                func,
-                prompt,
-                completion,
-                answer,
-                state,
-                task=task,
-                info=info,
-                **kwargs
-            )
+        score_tasks = [
+            self.call_reward_func(func, prompt, completion, answer, state, task, info, **kwargs)
             for func in self.get_reward_funcs()
         ]
-        reward_scores = await asyncio.gather(*futures)
+        reward_scores = await asyncio.gather(*score_tasks)
         rewards = {func.__name__: reward for func, reward in zip(self.get_reward_funcs(), reward_scores)}
         rewards['reward'] = sum([reward * weight for reward, weight in zip(reward_scores, self.get_reward_weights())])
         return rewards
-
-    async def _score_single(self, semaphore, *pcasti, **kw):
-        async with semaphore:
-            return await self.score_rollout(*pcasti, **kw)
-
-    async def _score_all(
-            self, prompts, completions, answers, states, tasks, infos,
-            max_concurrent: int = 1024,
-            **kwargs) -> Dict[str, List[float]]:
-        from tqdm.asyncio import tqdm_asyncio
-        semaphore = Semaphore(max_concurrent)
-        rollout_tasks = [
-            self._score_single(semaphore, *pcasti, **kwargs)
-            for pcasti in zip(prompts, completions, answers, states, tasks, infos)
-        ]
-        rewards = await tqdm_asyncio.gather(
-            *rollout_tasks,
-            total=len(prompts),
-            desc=f"Evaluating {len(prompts)} rollouts"
-        )
-        return {k: [item[k] for item in rewards] for k in rewards[0]}
     
     @weave.op
-    def score_rollouts(self,
-                       prompts: List[Union[str, List[Dict[str, Any]]]],
-                       completions: List[Union[str, List[Dict[str, Any]]]],
-                       answers: List[Any],
-                       states: List[Dict[str, Any]],
-                       tasks: List[str],
-                       infos: List[Dict[str, Any]] = [],
-                       max_concurrent: int = 1024,
-                       **kwargs) -> Dict[str, List[float]]:
+    async def score_rollouts(self,
+                             prompts: List[Union[str, List[Dict[str, Any]]]],
+                             completions: List[Union[str, List[Dict[str, Any]]]],
+                             answers: List[Any],
+                             states: List[Dict[str, Any]],
+                             tasks: List[str],
+                             infos: List[Dict[str, Any]] = [],
+                             **kwargs) -> Dict[str, List[float]]:
         """
         Compute reward scores for a group of rollouts.
         
@@ -170,33 +138,14 @@ class Rubric:
         - inter-group comparisons (voting, ranking, Elo, etc.)
         - scores computed using global state stored in Rubric class
         """
-        # ------------------------------------------------------------------
-        # Re-use a single event loop so its default ThreadPoolExecutor stays
-        # alive across multiple calls. This prevents race conditions where
-        # ``asyncio.to_thread`` tries to schedule work after the executor has
-        # already been shut down ("cannot schedule new futures after interpreter
-        # shutdown").
-        # ------------------------------------------------------------------
-
-        # Lazily create the loop on first use
-        if not hasattr(self, "_loop") or self._loop is None:
-            self._loop = asyncio.new_event_loop()
-            # Attach a sufficiently large shared executor
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent)
-            self._loop.set_default_executor(executor)
-
-        loop = self._loop
-
-        coro = self._score_all(
-            prompts, completions, answers, states, tasks, infos,
-            max_concurrent=max_concurrent,
-            **kwargs
+        from tqdm.asyncio import tqdm_asyncio
+        rollout_tasks = [
+            self.score_rollout(*pcasti, **kwargs)
+            for pcasti in zip(prompts, completions, answers, states, tasks, infos)
+        ]
+        rewards = await tqdm_asyncio.gather(
+            *rollout_tasks,
+            total=len(prompts),
+            desc=f"Evaluating {len(prompts)} rollouts"
         )
-
-        try:
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(coro)
-        finally:
-            # Detach loop so nested calls that expect no running loop can
-            # create their own. *Do not* close the loop/executor here.
-            asyncio.set_event_loop(None)
+        return {k: [item[k] for item in rewards] for k in rewards[0]} 

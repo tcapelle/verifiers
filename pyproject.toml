@@ -23,7 +23,7 @@ classifiers = [
 dependencies = [
     "torch>=2.6.0",
     "setuptools",
-    "accelerate",
+    "accelerate>=1.4.0",
     "peft",
     "wandb",
     "rich",
@@ -63,7 +63,7 @@ tests = [
 ]
 
 [project.scripts]
-vf-vllm = "verifiers.inference.vllm_server:cli_main"
+vf-vllm = "verifiers.inference.vllm_server:main"
 
 [tool.setuptools]
 packages = ["verifiers"]

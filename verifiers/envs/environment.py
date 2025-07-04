@@ -4,12 +4,12 @@ from asyncio import Semaphore
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from typing import Any, Dict, List, Literal, Tuple, Optional, Union
-import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase 
 
 from datasets import Dataset
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 
 from verifiers.utils.types import RewardFunc
 from verifiers.parsers import Parser
@@ -17,12 +17,15 @@ from verifiers.rubrics import Rubric
 
 import weave
 
+DEFAULT_MAX_CONCURRENT = 512
+DATASET_MAX_CONCURRENT = 32
+
 class Environment(ABC):
     """
     Base class for all environments.
     """
     def __init__(self,
-                 client: OpenAI | None = None,
+                 client: AsyncOpenAI | None = None,
                  model: str | None = None,
                  dataset: Dataset | None = None,
                  eval_dataset: Dataset | None = None,
@@ -31,7 +34,7 @@ class Environment(ABC):
                  parser: Parser = Parser(),
                  rubric: Rubric = Rubric(),
                  sampling_args: Dict[str, Any] = {},
-                 max_concurrent: int = 128,
+                 max_concurrent: int = DEFAULT_MAX_CONCURRENT,
                  message_type: Literal['chat', 'completion'] = 'chat',
                  **kwargs: Any):
 
@@ -41,15 +44,6 @@ class Environment(ABC):
         self.system_prompt = system_prompt
         self.few_shot = few_shot
         self.max_concurrent = max_concurrent
-        
-        # Ensure asyncio.to_thread doesn't hit default 32 thread limit
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent)
-            loop.set_default_executor(executor)
         
         if self.message_type == 'chat':
             if dataset is not None:
@@ -125,12 +119,12 @@ class Environment(ABC):
         if answer_key == "answer":
             return dataset.map(lambda x: {
                 "prompt": format_prompt_fn(x[question_key]),
-            }, num_proc=min(self.max_concurrent, 32))
+            }, num_proc=min(self.max_concurrent, DATASET_MAX_CONCURRENT))
         else:
             return dataset.map(lambda x: {
                 "prompt": format_prompt_fn(x[question_key]),
                 "answer": x[answer_key]
-            }, num_proc=min(self.max_concurrent, 32))
+            }, num_proc=min(self.max_concurrent, DATASET_MAX_CONCURRENT))
 
     def get_dataset(self, n: int = -1, seed: int = 0, **kwargs: Any) -> Dataset | None:
         if n > 0 and self.dataset is not None:
@@ -147,23 +141,23 @@ class Environment(ABC):
     
     def get_reward_weights(self, **kwargs: Any) -> List[float]:
         return self.rubric.get_reward_weights()
-    
+        
     @weave.op
-    def sanitize_sampling_args(self, client: OpenAI, sampling_args: Dict[str, Any]) -> Dict[str, Any]:
+    def sanitize_sampling_args(self,
+                               client: OpenAI | AsyncOpenAI,
+                               sampling_args: Dict[str, Any]) -> Dict[str, Any]:
         from urllib.parse import urlparse
         url = urlparse(str(client.base_url))
-        # check if url is not localhost/127.0.0.1/0.0.0.0
         if url.netloc not in ["localhost", "127.0.0.1", "0.0.0.0"]:
             sanitized_args = deepcopy(sampling_args)
-            # remove extra_body
             sanitized_args.pop('extra_body', None)
             return sanitized_args
         return sampling_args
 
     @weave.op
-    def get_model_response(self,
+    async def get_model_response(self,
                            prompt: str | List[Dict[str, str]],
-                           client: OpenAI,
+                           client: AsyncOpenAI,
                            model: str,
                            sampling_args: Dict[str, Any] = {},
                            message_type: Literal['chat', 'completion'] | None = None,
@@ -185,7 +179,7 @@ class Environment(ABC):
         try:
             if message_type == 'chat':
                 assert isinstance(prompt, list)
-                response = client.chat.completions.create(
+                response = await client.chat.completions.create(
                     model=model,
                     messages=prompt, # type: ignore
                     **sanitized_args
@@ -206,7 +200,7 @@ class Environment(ABC):
                     return "[ERROR] max_tokens_reached"
                 return response.choices[0].text # type: ignore
         except Exception as e:
-            # Check for prompt too long errors
+            # Check for prompt_too_long error
             error_msg = str(e)
             if "longer than the maximum" in error_msg or "exceeds the model" in error_msg:
                 return "[ERROR] prompt_too_long"
@@ -214,8 +208,8 @@ class Environment(ABC):
             raise
 
     @abstractmethod
-    def rollout(self,
-                client: OpenAI,
+    async def rollout(self,
+                client: AsyncOpenAI,
                 model: str,
                 prompt: str | List[Dict[str, Any]],
                 answer: str,
@@ -229,100 +223,39 @@ class Environment(ABC):
         """
         pass
 
-    async def _run_single(self,
-                          semaphore: Semaphore,
-                          client: OpenAI,
-                          model: str,
-                          prompt: str | List[Dict[str, Any]],
-                          answer: str,
-                          task: str = "default",
-                          info: Dict[str, Any] = {},
-                          sampling_args: Dict[str, Any] = {},
-                          **kwargs: Any) -> Tuple[Union[str, List[Dict[str, Any]]], Dict[str, Any]]:
-        """
-        Run a rollout for a given prompt.
-        Returns a tuple of (completion, state).
-        """
-        async with semaphore:
-            return await asyncio.to_thread(self.rollout, client, model, prompt, answer, task, info, sampling_args, **kwargs)
-
-    async def _run_all(self,
-                       client: OpenAI,
-                       model: str,
-                       prompts: List[str | List[Dict[str, str]]],
-                       answers: List[str],
-                       tasks: List[str] = [],
-                       infos: List[Dict[str, Any]] = [],
-                       sampling_args: Dict[str, Any] = {},
-                       max_concurrent: int = 128,
-                       **kwargs: Any) -> List[Tuple[Union[str, List[Dict[str, Any]]], Dict[str, Any]]]:
+    async def run_rollouts(self,
+                           client: AsyncOpenAI,
+                           model: str,
+                           prompts: List[str | List[Dict[str, str]]],
+                           answers: List[str],
+                           tasks: List[str] = [],
+                           infos: List[Dict[str, Any]] = [],
+                           sampling_args: Dict[str, Any] = {},
+                           max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+                           **kwargs: Any) -> List[Tuple[Union[str, List[Dict[str, Any]]], Dict[str, Any]]]:
         """
         Run rollouts for a given list of prompts and return the completions.
         """
         from tqdm.asyncio import tqdm_asyncio
-        semaphore = Semaphore(max_concurrent)
         rollout_tasks = [
-            self._run_single(semaphore, client, model, prompt, answer, task, info, sampling_args, **kwargs)
+            self.rollout(client, model, prompt, answer, task, info, sampling_args, **kwargs)
             for prompt, answer, task, info in zip(prompts, answers, tasks, infos)
         ]
+ 
         return await tqdm_asyncio.gather(
             *rollout_tasks,
             total=len(prompts),
             desc=f'Running {len(prompts)} rollouts'
         )
 
-    def run_rollouts(self,
-                     client: OpenAI,
-                     model: str,
-                     prompts: List[Union[str, List[Dict[str, Any]]]],
-                     answers: List[str],
-                     tasks: List[str] = [],
-                     infos: List[Dict[str, Any]] = [],
-                     sampling_args: Dict[str, Any] = {},
-                     max_concurrent: int = 128,
-                     **kwargs: Any) -> List[Tuple[Union[str, List[Dict[str, Any]]], Dict[str, Any]]]:
-        """
-        Run rollouts for a given list of prompts and return the completions.
-        """
-        # ------------------------------------------------------------------
-        # Use a persistent event loop to avoid shutting down the default
-        # ThreadPoolExecutor while background tasks may still schedule work.
-        # ------------------------------------------------------------------
-
-        if not hasattr(self, "_loop") or self._loop is None:
-            self._loop = asyncio.new_event_loop()
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent)
-            self._loop.set_default_executor(executor)
-
-        loop = self._loop
-
-        coro = self._run_all(
-            client=client,
-            model=model,
-            prompts=prompts,
-            answers=answers,
-            tasks=tasks,
-            infos=infos,
-            sampling_args=sampling_args,
-            max_concurrent=max_concurrent,
-            **kwargs
-        )
-
-        try:
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(coro)
-        finally:
-            asyncio.set_event_loop(None)
-    
-    @weave.op
-    def generate(self,
-                 inputs: Dict[str, List[Any]] | Dataset,
-                 client: OpenAI | None = None,
-                 model: str | None = None,
-                 sampling_args: Dict[str, Any] = {},
-                 max_concurrent: int | None = None,
-                 score_rollouts: bool = True,
-                 **kwargs: Any) -> Dict[str, Any]:
+    async def a_generate(self,
+                         inputs: Dict[str, List[Any]] | Dataset,
+                         client: AsyncOpenAI | None = None,
+                         model: str | None = None,
+                         sampling_args: Dict[str, Any] = {},
+                         max_concurrent: int | None = None,
+                         score_rollouts: bool = True,
+                         **kwargs: Any) -> Dict[str, Any]:
         """
         Generate completions and rewards for a given set of inputs.
         """
@@ -344,11 +277,18 @@ class Environment(ABC):
             results = {col: deepcopy(inputs[col]) for col in inputs.column_names}
         else:
             results = deepcopy(inputs)
+        if 'prompt' not in results:
+            raise ValueError('prompt column not found in inputs')
+        if 'answer' not in results and 'info' not in results:
+            raise ValueError('answer or info column must be found in inputs')
+        if 'answer' not in results:
+            results['answer'] = [''] * len(results['prompt'])
         if 'task' not in results:
             results['task'] = ['default'] * len(results['prompt'])
         if 'info' not in results:
             results['info'] = [{}] * len(results['prompt'])
-        rollouts = self.run_rollouts(
+
+        rollouts = await self.run_rollouts(
             prompts=results['prompt'],
             answers=results['answer'],
             tasks=results['task'],
@@ -364,7 +304,7 @@ class Environment(ABC):
         if 'task' not in results:
             results['task'] = ['default'] * len(results['prompt'])
         if score_rollouts:
-            results_rewards = self.rubric.score_rollouts( 
+            results_rewards = await self.rubric.score_rollouts( 
                 prompts=results['prompt'],
                 completions=results['completion'],
                 answers=results['answer'],
@@ -376,6 +316,37 @@ class Environment(ABC):
             )       
             results.update(results_rewards)
         return results
+
+    def generate(self,
+                 inputs: Dict[str, List[Any]] | Dataset,
+                 client: AsyncOpenAI | OpenAI | None = None,
+                 model: str | None = None,
+                 sampling_args: Dict[str, Any] = {},
+                 max_concurrent: int = DEFAULT_MAX_CONCURRENT,
+                 score_rollouts: bool = True,
+                 **kwargs: Any) -> Dict[str, Any]:
+        if isinstance(client, OpenAI):
+            client = AsyncOpenAI(api_key=client.api_key, base_url=client.base_url)
+        coro = self.a_generate(inputs, client, model, sampling_args, max_concurrent, score_rollouts, **kwargs)
+        
+        def setup_executor(loop):
+            loop.set_default_executor(ThreadPoolExecutor(max_workers=max_concurrent))
+        
+        try:
+            loop = asyncio.new_event_loop()
+            setup_executor(loop)
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+                asyncio.set_event_loop(None)
+        except RuntimeError:
+            import nest_asyncio
+            nest_asyncio.apply()
+            loop = asyncio.get_running_loop()
+            setup_executor(loop)
+            return loop.run_until_complete(coro)
     
     def process_chat_format(
         self,
@@ -441,7 +412,12 @@ class Environment(ABC):
             completion_mask.extend(msg_mask)
             # update previous tokenization for next iteration
             prev_ids = current_ids
-            assert len(completion_ids) == len(completion_mask), f"Length mismatch in chat format. Completion ids: {completion_ids}, completion mask: {completion_mask}"
+            assert len(completion_ids) == len(completion_mask), f"Length mismatch in chat format. \
+Completion ids: {completion_ids}, completion mask: {completion_mask}. \
+This often occurs with models whose tokenizer chat templates discard <think> tokens \
+from previous turns, such as Qwen3 or DeepSeek-R1-Distill models. \
+For Qwen3 models, you may want to replace the chat template with the Qwen2.5 chat template. \
+Model copies with swapped templates are available here: https://huggingface.co/collections/willcb/qwen3-68434f4883925bfdb4570ee5"
 
         return prompt_ids, prompt_mask, completion_ids, completion_mask
 
@@ -529,11 +505,11 @@ class Environment(ABC):
 
     # Evaluation and dataset generation
     def evaluate(self,
-                 client: OpenAI | None = None,
+                 client: AsyncOpenAI | OpenAI | None = None,
                  model: str | None = None,
                  sampling_args: Dict[str, Any] = {},
                  num_samples: int = -1,
-                 max_concurrent: int = 128,
+                 max_concurrent: int = DEFAULT_MAX_CONCURRENT,
                  **kwargs: Any
                 ) -> Dict[str, Any]:
         """
@@ -565,7 +541,7 @@ class Environment(ABC):
                      results: Dict[str, Any] | None = None,
                      push_to_hub: bool = False,
                      hub_name: str | None = None,
-                     client: OpenAI | None = None,
+                     client: AsyncOpenAI | OpenAI | None = None,
                      model: str | None = None,
                      max_concurrent: int | None = None,
                      num_samples: int = -1,
