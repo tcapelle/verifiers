@@ -285,7 +285,7 @@ class VeryFlexibleParser(FlexibleArgumentParser):
         new_args = args[:config_index] + section_args + args[config_index + 2:]
         return new_args
 
-def cli_main():
+def main():
     parser = VeryFlexibleParser(description="vLLM OpenAI-compatible server with weight synchronization")
     parser = make_arg_parser(parser)
     args = parser.parse_args()
@@ -294,4 +294,4 @@ def cli_main():
     uvloop.run(run_server(args))
 
 if __name__ == "__main__":
-    cli_main()
+    main()
