@@ -202,10 +202,11 @@ class Environment(ABC):
         except Exception as e:
             # Check for prompt_too_long error
             error_msg = str(e)
-            if "longer than the maximum" in error_msg or "exceeds the model" in error_msg:
+            if "lmaximum context length" in error_msg or "exceeds the model" in error_msg:
                 return "[ERROR] prompt_too_long"
+            return "[ERROR] unknown in chat.completions.create"
             # Re-raise other errors
-            raise
+            # raise
 
     @abstractmethod
     async def rollout(self,
