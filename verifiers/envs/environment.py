@@ -177,7 +177,8 @@ class Environment(ABC):
 
     def get_reward_weights(self) -> List[float]:
         return self.rubric.get_reward_weights()
-@weave.op
+    
+    @weave.op   
     async def get_model_response(
         self,
         client: AsyncOpenAI,

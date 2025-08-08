@@ -1,6 +1,7 @@
 from abc import abstractmethod
 from copy import deepcopy
 from typing import Tuple
+import weave
 
 from openai import AsyncOpenAI
 
@@ -41,6 +42,7 @@ class MultiTurnEnv(Environment):
         """
         pass
 
+    @weave.op
     async def rollout(
         self,
         client: AsyncOpenAI,
